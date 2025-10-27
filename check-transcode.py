@@ -126,6 +126,16 @@ FLAVOR_STATUS_MAP: Dict[Any, str] = {
 # ──────────────────────────────────────────────────────────────────────────────
 
 def get_attr_any(obj: Any, *names: str) -> Any:
+    """
+    Get the first non-empty attribute from an object.
+    
+    Args:
+        obj: Object to get attribute from
+        *names: Attribute names to try, in order
+        
+    Returns:
+        First non-empty attribute value, or None if all are empty
+    """
     for n in names:
         if hasattr(obj, n):
             v = getattr(obj, n)
@@ -134,6 +144,15 @@ def get_attr_any(obj: Any, *names: str) -> Any:
     return None
 
 def _unwrap_enum_value(v: Any) -> Any:
+    """
+    Extract the underlying value from a Kaltura enum object.
+    
+    Args:
+        v: Value to unwrap (may be int, str, or enum object)
+        
+    Returns:
+        Unwrapped value (int or str)
+    """
     if isinstance(v, (int, str)):
         return v
     for attr in ("value", "val", "code"):
@@ -144,6 +163,16 @@ def _unwrap_enum_value(v: Any) -> Any:
     return v
 
 def enum_label_code(value: Any, kind: str) -> Tuple[str, Any]:
+    """
+    Map enum value to human-readable label and code.
+    
+    Args:
+        value: Enum value to map
+        kind: Type of enum (e.g., "entry_status", "flavor_status")
+        
+    Returns:
+        Tuple of (label, code), or ("UNKNOWN", raw_value) if not found
+    """
     tables = {
         "entry_status": ENTRY_STATUS_MAP,
         "entry_type": ENTRY_TYPE_MAP,
@@ -205,6 +234,7 @@ def safe_float(x: Any, default: Optional[float] = 0.0) -> Optional[float]:
         return default
 
 def fmt_dt(ts: Any) -> str:
+    """Format Unix timestamp as human-readable datetime string."""
     try:
         t = datetime.fromtimestamp(int(ts), tz=timezone.utc)
         return t.strftime("%Y-%m-%d %H:%M:%S %Z")
@@ -212,6 +242,7 @@ def fmt_dt(ts: Any) -> str:
         return str(ts)
 
 def fmt_duration_ms(ms: Optional[int]) -> str:
+    """Format duration in milliseconds as human-readable string (e.g., '1h 23m 45.678s')."""
     if ms is None:
         return "unknown"
     total_s = ms / 1000.0
@@ -248,6 +279,15 @@ class FlavorClassified:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def derive_vcodec_from_tags(tags: Optional[str]) -> Optional[str]:
+    """
+    Derive video codec from flavor asset tags.
+    
+    Args:
+        tags: Comma-separated tags string from flavor asset
+        
+    Returns:
+        Codec identifier (e.g., 'hvc1', 'avc1', 'av01') or None
+    """
     if not tags:
         return None
     t = tags.lower()
@@ -265,6 +305,7 @@ def derive_vcodec_from_tags(tags: Optional[str]) -> Optional[str]:
     return None
 
 def codec_baseline_label(vcodec: Optional[str]) -> str:
+    """Get human-readable codec baseline label."""
     vc = (vcodec or "").lower()
     if "hvc" in vc or "hev" in vc or "265" in vc:
         return "HEVC baseline"
@@ -304,14 +345,30 @@ def expected_kbps(vcodec: Optional[str], width: int, height: int) -> int:
     if h <= 1100: return 4000
     return 5000
 
-def bpp_per_second(kbps: Optional[int], width: Optional[int], height: Optional[int], fps: Optional[float]) -> Optional[float]:
+def bpp_per_second(
+    kbps: Optional[int],
+    width: Optional[int],
+    height: Optional[int],
+    fps: Optional[float]
+) -> Optional[float]:
+    """Calculate bits per pixel per second."""
     if not (kbps and width and height and fps) or width <= 0 or height <= 0 or fps <= 0:
         return None
     return (kbps * 1000) / (width * height * fps)
 
-def low_high_for_res(vcodec: Optional[str], width: Optional[int], height: Optional[int],
-                     fps: Optional[float], kbps: Optional[int]) -> Tuple[bool, bool]:
-    """Return (likely_low, likely_high) for resolution@fps and codec baseline."""
+def low_high_for_res(
+    vcodec: Optional[str],
+    width: Optional[int],
+    height: Optional[int],
+    fps: Optional[float],
+    kbps: Optional[int]
+) -> Tuple[bool, bool]:
+    """
+    Check if bitrate is likely too low or too high for resolution and codec.
+    
+    Returns:
+        Tuple of (likely_low, likely_high) booleans
+    """
     bpp = bpp_per_second(kbps, width, height, fps)
     if bpp is None:
         return False, False
@@ -327,6 +384,12 @@ def low_high_for_res(vcodec: Optional[str], width: Optional[int], height: Option
     return bpp < low_thr, bpp > high_thr
 
 def efficiency_flags(width: Optional[int], height: Optional[int]) -> List[str]:
+    """
+    Check for encoding efficiency issues in dimensions.
+    
+    Returns:
+        List of flag strings (e.g., ['non_mod16', 'odd_aspect'])
+    """
     flags: List[str] = []
     if width and height:
         if width % 16 != 0 or height % 16 != 0:
@@ -408,6 +471,7 @@ def fetch_conversion_profile(client: KalturaClient, cp_id: int) -> Optional[Kalt
         return None
 
 def _parse_csv_ints(csv_str: str) -> List[int]:
+    """Parse comma-separated string of integers."""
     out: List[int] = []
     for tok in str(csv_str).split(","):
         tok = tok.strip()
@@ -567,6 +631,8 @@ def classify_flavor(client: KalturaClient, fa: KalturaFlavorAsset, include_urls:
 
 def extract_duration_ms(entry: Any, assets: List[KalturaFlavorAsset]) -> Optional[int]:
     """
+    Extract duration in milliseconds from entry.
+    
     Kaltura duration may be seconds or ms depending on context.
     Heuristics:
       - If >= 10000 -> ms.
@@ -591,10 +657,12 @@ def extract_duration_ms(entry: Any, assets: List[KalturaFlavorAsset]) -> Optiona
 # ──────────────────────────────────────────────────────────────────────────────
 
 def indent(lines: Iterable[str], n: int = 2) -> str:
+    """Indent each line by n spaces."""
     pad = " " * n
     return "\n".join(pad + line if line else "" for line in lines)
 
 def render_bitrate_bars(rungs: List[Tuple[str, int]], width: int = 54) -> List[str]:
+    """Render visual bitrate bars for ladder rungs."""
     if not rungs:
         return []
     max_br = max((k for _, k in rungs), default=1)
@@ -603,20 +671,29 @@ def render_bitrate_bars(rungs: List[Tuple[str, int]], width: int = 54) -> List[s
     for label, kbps in rungs:
         bar_len = max(1, int((kbps / max_br) * width))
         ratio = f"   (x{kbps / prev:.2f})" if (prev and prev > 0) else ""
-        lines.append(f"  {'█' * bar_len:<{width}}  {label:>12}  {kbps:>5} kbps{ratio}")
+        lines.append(
+            f"  {'█' * bar_len:<{width}}  {label:>12}  {kbps:>5} kbps{ratio}"
+        )
         prev = kbps
     return lines
 
 def switching_notes(sorted_bitrates: List[int]) -> List[str]:
+    """Generate ABR switching guidance notes for bitrate ladder."""
     notes: List[str] = []
     for a, b in zip(sorted_bitrates, sorted_bitrates[1:]):
         if a <= 0 or b <= 0:
             continue
         r = b / a
         if r < 1.2:
-            notes.append(f"• Tiny step: {a}→{b} (x{r:.2f}) — frequent switching, little quality gain.")
+            notes.append(
+                f"• Tiny step: {a}→{b} (x{r:.2f}) — "
+                "frequent switching, little quality gain."
+            )
         elif r > 2.5:
-            notes.append(f"• Large step: {a}→{b} (x{r:.2f}) — insert a mid rung to avoid a quality cliff.")
+            notes.append(
+                f"• Large step: {a}→{b} (x{r:.2f}) — "
+                "insert a mid rung to avoid a quality cliff."
+            )
     return notes
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -624,13 +701,18 @@ def switching_notes(sorted_bitrates: List[int]) -> List[str]:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def print_overview(entry: Any, duration_ms: Optional[int]) -> None:
+    """Print entry overview section."""
     etype, etype_code = enum_label_code(getattr(entry, "type", None), "entry_type")
     estatus, estatus_code = enum_label_code(getattr(entry, "status", None), "entry_status")
     stype, stype_code = enum_label_code(getattr(entry, "sourceType", None), "source_type")
     name = getattr(entry, "name", "") or getattr(entry, "title", "")
     # Build a reliable source-download URL (paramId=0)
     partner_id = getattr(entry, "partnerId", "") or getattr(entry, "partner_id", "")
-    source_url = f"https://cdnapisec.kaltura.com/p/{partner_id}/sp/{partner_id}00/playManifest/entryId/{entry.id}/format/download/protocol/https/flavorParamIds/0"
+    source_url = (
+        f"https://cdnapisec.kaltura.com/p/{partner_id}/sp/{partner_id}00/"
+        f"playManifest/entryId/{entry.id}/format/download/protocol/https/"
+        f"flavorParamIds/0"
+    )
     print("📌 Overview")
     print(
         indent(
@@ -639,7 +721,8 @@ def print_overview(entry: Any, duration_ms: Optional[int]) -> None:
                 f"Type:    {etype} ({etype_code})    Status: {estatus} ({estatus_code})",
                 f"User:    {getattr(entry, 'userId', '')}  Duration: {fmt_duration_ms(duration_ms)}",
                 f"Source:  {stype} ({stype_code})  Download: {source_url}",
-                f"Created: {fmt_dt(getattr(entry, 'createdAt', None))}  Updated: {fmt_dt(getattr(entry, 'updatedAt', None))}",
+                f"Created: {fmt_dt(getattr(entry, 'createdAt', None))}  "
+                f"Updated: {fmt_dt(getattr(entry, 'updatedAt', None))}",
             ]
         )
     )
@@ -652,6 +735,7 @@ def print_conversion_profile(
     source_dims: Tuple[Optional[int], Optional[int]],
     params_by_id: Dict[int, KalturaFlavorParams],
 ) -> None:
+    """Print conversion profile analysis section."""
     print("🧩 Conversion Profile")
     if not cp:
         print(indent(["(No conversion profile associated with this entry)"]))
@@ -758,7 +842,11 @@ def print_conversion_profile(
     print()
 
 def print_summary(classified: List[FlavorClassified]) -> None:
-    shown = [c for c in classified if c.kind in {"TRANSCODED", "SOURCE"} and (c.bitrate_kbps or 0) > 0]
+    """Print summary statistics section."""
+    shown = [
+        c for c in classified
+        if c.kind in {"TRANSCODED", "SOURCE"} and (c.bitrate_kbps or 0) > 0
+    ]
     print("📊 Summary")
     if not shown:
         print(indent(["No playable rungs found."]))
@@ -800,8 +888,13 @@ def print_summary(classified: List[FlavorClassified]) -> None:
     print()
 
 def print_visual_ladder(classified: List[FlavorClassified]) -> None:
+    """Print visual bitrate ladder with bars."""
     rungs = sorted(
-        [(c.asset_id, int(c.bitrate_kbps)) for c in classified if c.kind in {"TRANSCODED", "SOURCE"} and (c.bitrate_kbps or 0) > 0],
+        [
+            (c.asset_id, int(c.bitrate_kbps))
+            for c in classified
+            if c.kind in {"TRANSCODED", "SOURCE"} and (c.bitrate_kbps or 0) > 0
+        ],
         key=lambda x: x[1],
     )
     if not rungs:
@@ -811,43 +904,70 @@ def print_visual_ladder(classified: List[FlavorClassified]) -> None:
         print(line)
     notes = switching_notes([kb for _, kb in rungs])
     if notes:
-        print("  Guidance: Aim for ~1.3–1.6× bitrate increase between adjacent rungs to stabilize ABR switching.")
+        print(
+            "  Guidance: Aim for ~1.3–1.6× bitrate increase between "
+            "adjacent rungs to stabilize ABR switching."
+        )
         print("  Switching Notes:")
         for n in notes:
             print("   " + n)
     print()
 
 def print_skipped(classified: List[FlavorClassified]) -> None:
+    """Print skipped flavors section."""
     skipped = [c for c in classified if c.kind == "SKIPPED"]
     if not skipped:
         return
     print("⏭️  Skipped by Optimization (NOT_APPLICABLE)")
     for c in skipped:
-        reason = c.reason or "The source asset has a lower quality than the requested output; transcoding was not performed."
+        reason = (
+            c.reason or
+            "The source asset has a lower quality than the requested output; "
+            "transcoding was not performed."
+        )
         print(indent([f"- {c.asset_id} reason: {reason}"]))
     print()
 
 def print_issues(classified: List[FlavorClassified]) -> None:
+    """Print issues and warnings section."""
     to_show: List[str] = []
     for c in classified:
         if c.kind == "ERROR":
             detail = (c.reason or "").replace("\r", "").strip()
-            to_show.append(f"- {c.asset_id} Status: ERROR (-1) — {detail if detail else 'no details'}")
+            to_show.append(
+                f"- {c.asset_id} Status: ERROR (-1) — "
+                f"{detail if detail else 'no details'}"
+            )
         else:
-            low, high = low_high_for_res(c.vcodec, c.width, c.height, c.fps, c.bitrate_kbps)
+            low, high = low_high_for_res(
+                c.vcodec, c.width, c.height, c.fps, c.bitrate_kbps
+            )
             label = codec_baseline_label(c.vcodec)
             if low:
-                to_show.append(f"- {c.asset_id} Bitrate may be low for resolution ({label})")
+                to_show.append(
+                    f"- {c.asset_id} Bitrate may be low for resolution ({label})"
+                )
             if high:
-                to_show.append(f"- {c.asset_id} Bitrate may be higher than needed for resolution ({label})")
+                to_show.append(
+                    f"- {c.asset_id} Bitrate may be higher than needed "
+                    f"for resolution ({label})"
+                )
     if to_show:
         print("❗ Issues")
         print(indent(to_show))
         print()
 
-def print_ladder_table(classified: List[FlavorClassified], include_urls: bool, src_h: Optional[int]) -> None:
+def print_ladder_table(
+    classified: List[FlavorClassified],
+    include_urls: bool,
+    src_h: Optional[int]
+) -> None:
+    """Print detailed ladder table."""
     print("📶 Ladder")
-    print("id           type                 kbps         WxH   fps   vcodec    exp      Δ%  flags")
+    print(
+        "id           type                 kbps         WxH   fps   "
+        "vcodec    exp      Δ%  flags"
+    )
     for c in sorted(classified, key=lambda x: (x.bitrate_kbps or 0, x.asset_id)):
         w, h = safe_int(c.width, 0), safe_int(c.height, 0)
         fps = safe_float(c.fps, 0.0)
@@ -876,20 +996,31 @@ def print_ladder_table(classified: List[FlavorClassified], include_urls: bool, s
         fps_txt = f"{fps:.1f}" if fps else "0.0"
         vcodec_txt = (vcodec or "").lower() or "-"
 
-        print(f"{c.asset_id:<12} {kind_label:<20} {kb:>6} {wh:>10} {fps_txt:>5}  {vcodec_txt:<8} {exp:>6} {delta_pct:>7}  {flags_str}")
+        print(
+            f"{c.asset_id:<12} {kind_label:<20} {kb:>6} {wh:>10} {fps_txt:>5}  "
+            f"{vcodec_txt:<8} {exp:>6} {delta_pct:>7}  {flags_str}"
+        )
 
         # Inline, human-friendly explanations:
         extra: List[str] = []
         if "non_mod16" in flags:
-            extra.append("Dimensions not aligned to 16-pixel macroblocks/CTUs (slightly less codec/hardware friendly)")
+            extra.append(
+                "Dimensions not aligned to 16-pixel macroblocks/CTUs "
+                "(slightly less codec/hardware friendly)"
+            )
         if "odd_aspect" in flags:
             extra.append("Unusual aspect ratio; verify intended display geometry")
         if "above_source_height" in flags:
-            extra.append("Target height exceeds source; Optimization may mark as NOT_APPLICABLE")
+            extra.append(
+                "Target height exceeds source; Optimization may mark as NOT_APPLICABLE"
+            )
         if c.kind == "ERROR" and c.reason:
             extra.append(f"Error details: {c.reason.replace(chr(13), '').strip()}")
         if c.kind == "SKIPPED":
-            extra.append(f"Skipped (NOT_APPLICABLE [4]): {c.reason or 'Optimization skipped: source < target/policy'}")
+            extra.append(
+                f"Skipped (NOT_APPLICABLE [4]): "
+                f"{c.reason or 'Optimization skipped: source < target/policy'}"
+            )
         if c.kind == "PENDING":
             extra.append(f"In pipeline: {c.status_label} ({c.status_code})")
         if c.kind == "SOURCE":
