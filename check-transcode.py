@@ -28,6 +28,9 @@ Usage
 from __future__ import annotations
 
 import argparse
+import json
+import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -165,14 +168,38 @@ def enum_label_code(value: Any, kind: str) -> Tuple[str, Any]:
         return table[as_str], as_str
     return "UNKNOWN", raw
 
-def safe_int(x: Any, default: int = 0) -> int:
+def safe_int(x: Any, default: Optional[int] = 0) -> Optional[int]:
+    """
+    Safely convert value to int with a default.
+    
+    Args:
+        x: Value to convert
+        default: Default value if conversion fails (can be None)
+        
+    Returns:
+        Converted int or default value
+    """
     try:
+        if x is None:
+            return default
         return int(x)
     except Exception:
         return default
 
-def safe_float(x: Any, default: float = 0.0) -> float:
+def safe_float(x: Any, default: Optional[float] = 0.0) -> Optional[float]:
+    """
+    Safely convert value to float with a default.
+    
+    Args:
+        x: Value to convert
+        default: Default value if conversion fails (can be None)
+        
+    Returns:
+        Converted float or default value
+    """
     try:
+        if x is None:
+            return default
         return float(x)
     except Exception:
         return default
@@ -317,16 +344,62 @@ def efficiency_flags(width: Optional[int], height: Optional[int]) -> List[str]:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def fetch_entry(client: KalturaClient, entry_id: str) -> KalturaBaseEntry:
+    """
+    Fetch a Kaltura entry by ID.
+    
+    Args:
+        client: Authenticated Kaltura client
+        entry_id: Entry ID to fetch
+        
+    Returns:
+        KalturaBaseEntry object
+        
+    Raises:
+        Exception: If entry cannot be fetched (e.g., not found, permission denied)
+    """
     return client.baseEntry.get(entry_id)  # type: ignore
 
 def fetch_flavor_assets(client: KalturaClient, entry_id: str) -> List[KalturaFlavorAsset]:
+    """
+    Fetch all flavor assets for an entry with full pagination support.
+    
+    Args:
+        client: Authenticated Kaltura client
+        entry_id: Entry ID to fetch flavors for
+        
+    Returns:
+        List of all KalturaFlavorAsset objects for the entry
+    """
     f = KalturaFlavorAssetFilter()
     f.entryIdEqual = entry_id
-    pager = KalturaFilterPager(pageSize=500, pageIndex=1)
-    res = client.flavorAsset.list(f, pager)  # type: ignore
-    return list(res.objects or [])
+    page_size = 500
+    page_index = 1
+    all_assets: List[KalturaFlavorAsset] = []
+    
+    while True:
+        pager = KalturaFilterPager(pageSize=page_size, pageIndex=page_index)
+        res = client.flavorAsset.list(f, pager)  # type: ignore
+        objects = list(res.objects or [])
+        all_assets.extend(objects)
+        
+        # Break if we received fewer results than the page size
+        if len(objects) < page_size:
+            break
+        page_index += 1
+    
+    return all_assets
 
 def fetch_conversion_profile(client: KalturaClient, cp_id: int) -> Optional[KalturaConversionProfile]:
+    """
+    Fetch a conversion profile by ID.
+    
+    Args:
+        client: Authenticated Kaltura client
+        cp_id: Conversion profile ID
+        
+    Returns:
+        KalturaConversionProfile object or None if not found or ID is invalid
+    """
     if cp_id <= 0:
         return None
     try:
@@ -350,7 +423,7 @@ def fetch_enabled_flavor_param_ids(client: KalturaClient, cp: Optional[KalturaCo
     Return Flavor Params IDs enabled on the Conversion Profile.
     Strategy:
       1) Use cp.flavorParamsIds (common) or cp.profileParamsIds (older) if present (CSV).
-      2) Fallback to conversionProfileAssetParams.list (collect flavorParamsId).
+      2) Fallback to conversionProfileAssetParams.list with full pagination (collect flavorParamsId).
     """
     ids: List[int] = []
     if cp:
@@ -360,21 +433,45 @@ def fetch_enabled_flavor_param_ids(client: KalturaClient, cp: Optional[KalturaCo
             if ids:
                 return sorted(set(ids))
 
-        # Fallback: list ConversionProfileAssetParams
+        # Fallback: list ConversionProfileAssetParams with full pagination
         try:
             flt = KalturaConversionProfileAssetParamsFilter()
             flt.conversionProfileIdEqual = int(getattr(cp, "id", 0))
-            pager = KalturaFilterPager(pageSize=500, pageIndex=1)
-            res = client.conversionProfileAssetParams.list(flt, pager)  # type: ignore
-            for obj in list(getattr(res, "objects", []) or []):
-                pid = getattr(obj, "flavorParamsId", None)
-                if isinstance(pid, int):
-                    ids.append(pid)
+            page_size = 500
+            page_index = 1
+            
+            while True:
+                pager = KalturaFilterPager(pageSize=page_size, pageIndex=page_index)
+                res = client.conversionProfileAssetParams.list(flt, pager)  # type: ignore
+                objects = list(getattr(res, "objects", []) or [])
+                
+                for obj in objects:
+                    pid = getattr(obj, "flavorParamsId", None)
+                    if isinstance(pid, int):
+                        ids.append(pid)
+                
+                # Break if we received fewer results than the page size
+                if len(objects) < page_size:
+                    break
+                page_index += 1
         except Exception:
             pass
     return sorted(set(ids))
 
 def fetch_flavor_params_by_ids(client: KalturaClient, ids: Iterable[int]) -> Dict[int, KalturaFlavorParams]:
+    """
+    Fetch flavor parameters by IDs.
+    
+    Note: This uses a loop because the Kaltura client lacks a batch-get method
+    for flavor params. Each ID requires a separate API call.
+    
+    Args:
+        client: Authenticated Kaltura client
+        ids: Iterable of flavor param IDs to fetch
+        
+    Returns:
+        Dictionary mapping flavor param ID to KalturaFlavorParams object
+    """
     out: Dict[int, KalturaFlavorParams] = {}
     for pid in sorted(set(int(i) for i in ids if i != 0)):
         try:
@@ -388,10 +485,22 @@ def fetch_flavor_params_by_ids(client: KalturaClient, ids: Iterable[int]) -> Dic
 # ──────────────────────────────────────────────────────────────────────────────
 
 def classify_flavor(client: KalturaClient, fa: KalturaFlavorAsset, include_urls: bool) -> FlavorClassified:
+    """
+    Classify a flavor asset with normalized type handling.
+    
+    Args:
+        client: Authenticated Kaltura client
+        fa: Flavor asset to classify
+        include_urls: Whether to include download URLs
+        
+    Returns:
+        FlavorClassified object with normalized data
+    """
     status_label, status_code = enum_label_code(getattr(fa, "status", None), "flavor_status")
 
     is_original = bool(getattr(fa, "isOriginal", False))
-    flavor_params_id = getattr(fa, "flavorParamsId", None)
+    # Normalize flavorParamsId to int using safe_int
+    flavor_params_id = safe_int(getattr(fa, "flavorParamsId", None), None)
     reason = (getattr(fa, "description", None) or "").strip() or None
 
     # Kind
@@ -427,20 +536,29 @@ def classify_flavor(client: KalturaClient, fa: KalturaFlavorAsset, include_urls:
             except Exception:
                 url = None
 
+    # Normalize all numeric fields
+    width = safe_int(getattr(fa, "width", None), None)
+    height = safe_int(getattr(fa, "height", None), None)
+    fps = safe_float(getattr(fa, "frameRate", None) or getattr(fa, "frame_rate", None), None)
+    bitrate_kbps = safe_int(
+        getattr(fa, "bitrate", None)
+        or getattr(fa, "bitrateKbps", None)
+        or getattr(fa, "bitrateInKbps", None),
+        None
+    )
+
     return FlavorClassified(
         asset_id=getattr(fa, "id", ""),
-        flavor_params_id=int(flavor_params_id) if isinstance(flavor_params_id, int) else None,
+        flavor_params_id=flavor_params_id,
         status_label=status_label,
         status_code=status_code,
         kind=kind,
         reason=reason,
         is_original=is_original,
-        width=getattr(fa, "width", None),
-        height=getattr(fa, "height", None),
-        fps=getattr(fa, "frameRate", None) or getattr(fa, "frame_rate", None),
-        bitrate_kbps=getattr(fa, "bitrate", None)
-                    or getattr(fa, "bitrateKbps", None)
-                    or getattr(fa, "bitrateInKbps", None),
+        width=width,
+        height=height,
+        fps=fps,
+        bitrate_kbps=bitrate_kbps,
         vcodec=vcodec,
         acodec=acodec,
         tags=getattr(fa, "tags", None),
@@ -788,57 +906,223 @@ def print_ladder_table(classified: List[FlavorClassified], include_urls: bool, s
 # ──────────────────────────────────────────────────────────────────────────────
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Inspect a Kaltura entry’s conversion profile and transcode ladder.")
-    ap.add_argument("--partner-id", type=int, required=True)
-    ap.add_argument("--admin-secret", required=True)
-    ap.add_argument("--admin-user-id", required=True)
-    ap.add_argument("--entry-id", required=True)
-    ap.add_argument("--service-url", default="https://www.kaltura.com/")
-    ap.add_argument("--include-urls", action="store_true", help="Include per-flavor download URLs (when available).")
+    """
+    Main entry point for the script.
+    
+    Returns:
+        Exit code (0 for success, non-zero for errors)
+    """
+    ap = argparse.ArgumentParser(
+        description="Inspect a Kaltura entry's conversion profile and transcode ladder."
+    )
+    ap.add_argument("--partner-id", type=int, required=True, help="Kaltura Partner ID")
+    ap.add_argument(
+        "--admin-secret",
+        default=os.environ.get("KALTURA_ADMIN_SECRET"),
+        help="Kaltura admin secret (or set KALTURA_ADMIN_SECRET environment variable)"
+    )
+    ap.add_argument("--admin-user-id", required=True, help="Kaltura admin user ID")
+    ap.add_argument("--entry-id", required=True, help="Entry ID to analyze")
+    ap.add_argument(
+        "--service-url",
+        default="https://www.kaltura.com/",
+        help="Kaltura service URL (default: https://www.kaltura.com/)"
+    )
+    ap.add_argument(
+        "--include-urls",
+        action="store_true",
+        help="Include per-flavor download URLs (when available)"
+    )
+    ap.add_argument(
+        "--json",
+        action="store_true",
+        help="Output results in JSON format for machine-readable consumption"
+    )
+    ap.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug logging"
+    )
     args = ap.parse_args()
+    
+    # Validate admin-secret
+    if not args.admin_secret:
+        print(
+            "❌ Error: --admin-secret is required "
+            "(or set KALTURA_ADMIN_SECRET environment variable)", 
+            file=sys.stderr
+        )
+        return 1
+    
+    # Set up logging
+    log_level = logging.DEBUG if args.debug else logging.INFO
+    logging.basicConfig(
+        level=log_level,
+        format='%(levelname)s: %(message)s'
+    )
+    logger = logging.getLogger(__name__)
+    
+    try:
+        # Client initialization
+        logger.debug(f"Initializing Kaltura client for partner {args.partner_id}")
+        cfg = KalturaConfiguration(args.partner_id)
+        cfg.serviceUrl = args.service_url
+        client = KalturaClient(cfg)
+        
+        # Authentication
+        logger.debug(f"Starting session for user {args.admin_user_id}")
+        try:
+            ks = client.session.start(
+                args.admin_secret,
+                args.admin_user_id,
+                KalturaSessionType.ADMIN,
+                args.partner_id
+            )
+            if not ks or not isinstance(ks, str) or len(ks) == 0:
+                print(
+                    "❌ Authentication Failed: Invalid session key returned",
+                    file=sys.stderr
+                )
+                return 2
+            client.setKs(ks)
+            logger.debug("Session started successfully")
+        except Exception as e:
+            print(f"❌ Authentication Failed: {e}", file=sys.stderr)
+            return 2
 
-    # Client
-    cfg = KalturaConfiguration(args.partner_id)
-    cfg.serviceUrl = args.service_url
-    client = KalturaClient(cfg)
-    ks = client.session.start(args.admin_secret, args.admin_user_id, KalturaSessionType.ADMIN, args.partner_id)
-    client.setKs(ks)
+        # Fetch entry
+        logger.debug(f"Fetching entry {args.entry_id}")
+        try:
+            entry = fetch_entry(client, args.entry_id)
+        except Exception as e:
+            print(f"❌ Failed to fetch entry '{args.entry_id}': {e}", file=sys.stderr)
+            logger.debug("Entry fetch error details", exc_info=True)
+            return 3
+        
+        # Fetch flavor assets
+        logger.debug("Fetching flavor assets")
+        try:
+            assets = fetch_flavor_assets(client, args.entry_id)
+            logger.debug(f"Found {len(assets)} flavor assets")
+        except Exception as e:
+            print(f"❌ Failed to fetch flavor assets: {e}", file=sys.stderr)
+            logger.debug("Flavor assets fetch error details", exc_info=True)
+            return 4
 
-    # Fetch entry & flavors
-    entry = fetch_entry(client, args.entry_id)
-    assets = fetch_flavor_assets(client, args.entry_id)
+        # Robust duration
+        duration_ms = extract_duration_ms(entry, assets)
 
-    # Robust duration
-    duration_ms = extract_duration_ms(entry, assets)
+        # Classify flavors
+        logger.debug("Classifying flavors")
+        classified: List[FlavorClassified] = [
+            classify_flavor(client, fa, args.include_urls) for fa in assets
+        ]
 
-    # Classify flavors
-    classified: List[FlavorClassified] = [classify_flavor(client, fa, args.include_urls) for fa in assets]
+        # Source dimensions (prefer the uploaded source, fall back to entry dims)
+        src_w = safe_int(get_attr_any(entry, "width"), 0)
+        src_h = safe_int(get_attr_any(entry, "height"), 0)
+        for c in classified:
+            if c.kind == "SOURCE":
+                src_w = c.width or src_w
+                src_h = c.height or src_h
+                break
 
-    # Source dimensions (prefer the uploaded source, fall back to entry dims)
-    src_w = safe_int(get_attr_any(entry, "width"), 0)
-    src_h = safe_int(get_attr_any(entry, "height"), 0)
-    for c in classified:
-        if c.kind == "SOURCE":
-            src_w = c.width or src_w
-            src_h = c.height or src_h
-            break
+        # Conversion profile
+        logger.debug("Fetching conversion profile")
+        cp_id = safe_int(
+            get_attr_any(entry, "conversionProfileId", "conversion_profile_id"), 0
+        )
+        try:
+            cp = fetch_conversion_profile(client, cp_id)
+            enabled_param_ids = fetch_enabled_flavor_param_ids(client, cp)
+            params_by_id = (
+                fetch_flavor_params_by_ids(client, enabled_param_ids)
+                if enabled_param_ids
+                else {}
+            )
+            logger.debug(
+                f"Conversion profile: {cp_id}, enabled params: {enabled_param_ids}"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to fetch conversion profile details: {e}")
+            cp = None
+            enabled_param_ids = []
+            params_by_id = {}
 
-    # Conversion profile
-    cp_id = safe_int(get_attr_any(entry, "conversionProfileId", "conversion_profile_id"), 0)
-    cp = fetch_conversion_profile(client, cp_id)
-    enabled_param_ids = fetch_enabled_flavor_param_ids(client, cp)
-    params_by_id = fetch_flavor_params_by_ids(client, enabled_param_ids) if enabled_param_ids else {}
+        # Output
+        if args.json:
+            # JSON output
+            output_data = {
+                "entry": {
+                    "id": getattr(entry, "id", ""),
+                    "name": getattr(entry, "name", "") or getattr(entry, "title", ""),
+                    "type": enum_label_code(
+                        getattr(entry, "type", None), "entry_type"
+                    )[0],
+                    "status": enum_label_code(
+                        getattr(entry, "status", None), "entry_status"
+                    )[0],
+                    "duration_ms": duration_ms,
+                    "width": src_w,
+                    "height": src_h,
+                    "created_at": getattr(entry, "createdAt", None),
+                    "updated_at": getattr(entry, "updatedAt", None),
+                },
+                "conversion_profile": {
+                    "id": cp_id,
+                    "name": getattr(cp, "name", "") if cp else None,
+                    "type": enum_label_code(
+                        getattr(cp, "type", None), "cp_type"
+                    )[0] if cp else None,
+                    "status": enum_label_code(
+                        getattr(cp, "status", None), "cp_status"
+                    )[0] if cp else None,
+                    "enabled_param_ids": enabled_param_ids,
+                } if cp else None,
+                "flavors": [
+                    {
+                        "asset_id": c.asset_id,
+                        "flavor_params_id": c.flavor_params_id,
+                        "status": c.status_label,
+                        "kind": c.kind,
+                        "reason": c.reason,
+                        "is_original": c.is_original,
+                        "width": c.width,
+                        "height": c.height,
+                        "fps": c.fps,
+                        "bitrate_kbps": c.bitrate_kbps,
+                        "vcodec": c.vcodec,
+                        "acodec": c.acodec,
+                        "tags": c.tags,
+                        "download_url": c.download_url,
+                    }
+                    for c in classified
+                ],
+            }
+            print(json.dumps(output_data, indent=2))
+        else:
+            # Human-readable output
+            print_overview(entry, duration_ms)
+            print_conversion_profile(
+                cp, enabled_param_ids, classified, (src_w, src_h), params_by_id
+            )
+            print_summary(classified)
+            print_visual_ladder(classified)
+            print_skipped(classified)
+            print_issues(classified)
+            print_ladder_table(
+                classified, include_urls=args.include_urls, src_h=src_h or None
+            )
 
-    # Output
-    print_overview(entry, duration_ms)
-    print_conversion_profile(cp, enabled_param_ids, classified, (src_w, src_h), params_by_id)
-    print_summary(classified)
-    print_visual_ladder(classified)
-    print_skipped(classified)
-    print_issues(classified)
-    print_ladder_table(classified, include_urls=args.include_urls, src_h=src_h or None)
-
-    return 0
+        return 0
+        
+    except KeyboardInterrupt:
+        print("\n❌ Operation cancelled by user", file=sys.stderr)
+        return 130
+    except Exception as e:
+        print(f"❌ Unexpected error: {e}", file=sys.stderr)
+        logger.debug("Unexpected error details", exc_info=True)
+        return 1
 
 if __name__ == "__main__":
     sys.exit(main())
