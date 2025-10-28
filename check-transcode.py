@@ -28,6 +28,10 @@ Usage
 from __future__ import annotations
 
 import argparse
+from collections import defaultdict
+import json
+import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -123,6 +127,16 @@ FLAVOR_STATUS_MAP: Dict[Any, str] = {
 # ──────────────────────────────────────────────────────────────────────────────
 
 def get_attr_any(obj: Any, *names: str) -> Any:
+    """
+    Get the first non-empty attribute from an object.
+    
+    Args:
+        obj: Object to get attribute from
+        *names: Attribute names to try, in order
+        
+    Returns:
+        First non-empty attribute value, or None if all are empty
+    """
     for n in names:
         if hasattr(obj, n):
             v = getattr(obj, n)
@@ -131,6 +145,15 @@ def get_attr_any(obj: Any, *names: str) -> Any:
     return None
 
 def _unwrap_enum_value(v: Any) -> Any:
+    """
+    Extract the underlying value from a Kaltura enum object.
+    
+    Args:
+        v: Value to unwrap (may be int, str, or enum object)
+        
+    Returns:
+        Unwrapped value (int or str)
+    """
     if isinstance(v, (int, str)):
         return v
     for attr in ("value", "val", "code"):
@@ -141,6 +164,16 @@ def _unwrap_enum_value(v: Any) -> Any:
     return v
 
 def enum_label_code(value: Any, kind: str) -> Tuple[str, Any]:
+    """
+    Map enum value to human-readable label and code.
+    
+    Args:
+        value: Enum value to map
+        kind: Type of enum (e.g., "entry_status", "flavor_status")
+        
+    Returns:
+        Tuple of (label, code), or ("UNKNOWN", raw_value) if not found
+    """
     tables = {
         "entry_status": ENTRY_STATUS_MAP,
         "entry_type": ENTRY_TYPE_MAP,
@@ -165,19 +198,44 @@ def enum_label_code(value: Any, kind: str) -> Tuple[str, Any]:
         return table[as_str], as_str
     return "UNKNOWN", raw
 
-def safe_int(x: Any, default: int = 0) -> int:
+def safe_int(x: Any, default: Optional[int] = 0) -> Optional[int]:
+    """
+    Safely convert value to int with a default.
+    
+    Args:
+        x: Value to convert
+        default: Default value if conversion fails (can be None)
+        
+    Returns:
+        Converted int or default value
+    """
     try:
+        if x is None:
+            return default
         return int(x)
     except Exception:
         return default
 
-def safe_float(x: Any, default: float = 0.0) -> float:
+def safe_float(x: Any, default: Optional[float] = 0.0) -> Optional[float]:
+    """
+    Safely convert value to float with a default.
+    
+    Args:
+        x: Value to convert
+        default: Default value if conversion fails (can be None)
+        
+    Returns:
+        Converted float or default value
+    """
     try:
+        if x is None:
+            return default
         return float(x)
     except Exception:
         return default
 
 def fmt_dt(ts: Any) -> str:
+    """Format Unix timestamp as human-readable datetime string."""
     try:
         t = datetime.fromtimestamp(int(ts), tz=timezone.utc)
         return t.strftime("%Y-%m-%d %H:%M:%S %Z")
@@ -185,6 +243,7 @@ def fmt_dt(ts: Any) -> str:
         return str(ts)
 
 def fmt_duration_ms(ms: Optional[int]) -> str:
+    """Format duration in milliseconds as human-readable string (e.g., '1h 23m 45.678s')."""
     if ms is None:
         return "unknown"
     total_s = ms / 1000.0
@@ -193,6 +252,12 @@ def fmt_duration_ms(ms: Optional[int]) -> str:
     if h >= 1:
         return f"{int(h)}h {int(m)}m {s:.3f}s"
     return f"{int(m)}m {s:.3f}s"
+
+def clean_reason(reason: Optional[str]) -> str:
+    """Clean and normalize reason text by removing carriage returns and extra whitespace."""
+    if not reason:
+        return ""
+    return reason.replace("\r", "").replace(chr(13), "").strip()
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Models
@@ -221,6 +286,15 @@ class FlavorClassified:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def derive_vcodec_from_tags(tags: Optional[str]) -> Optional[str]:
+    """
+    Derive video codec from flavor asset tags.
+    
+    Args:
+        tags: Comma-separated tags string from flavor asset
+        
+    Returns:
+        Codec identifier (e.g., 'hvc1', 'avc1', 'av01') or None
+    """
     if not tags:
         return None
     t = tags.lower()
@@ -238,6 +312,7 @@ def derive_vcodec_from_tags(tags: Optional[str]) -> Optional[str]:
     return None
 
 def codec_baseline_label(vcodec: Optional[str]) -> str:
+    """Get human-readable codec baseline label."""
     vc = (vcodec or "").lower()
     if "hvc" in vc or "hev" in vc or "265" in vc:
         return "HEVC baseline"
@@ -277,14 +352,30 @@ def expected_kbps(vcodec: Optional[str], width: int, height: int) -> int:
     if h <= 1100: return 4000
     return 5000
 
-def bpp_per_second(kbps: Optional[int], width: Optional[int], height: Optional[int], fps: Optional[float]) -> Optional[float]:
+def bpp_per_second(
+    kbps: Optional[int],
+    width: Optional[int],
+    height: Optional[int],
+    fps: Optional[float]
+) -> Optional[float]:
+    """Calculate bits per pixel per second."""
     if not (kbps and width and height and fps) or width <= 0 or height <= 0 or fps <= 0:
         return None
     return (kbps * 1000) / (width * height * fps)
 
-def low_high_for_res(vcodec: Optional[str], width: Optional[int], height: Optional[int],
-                     fps: Optional[float], kbps: Optional[int]) -> Tuple[bool, bool]:
-    """Return (likely_low, likely_high) for resolution@fps and codec baseline."""
+def low_high_for_res(
+    vcodec: Optional[str],
+    width: Optional[int],
+    height: Optional[int],
+    fps: Optional[float],
+    kbps: Optional[int]
+) -> Tuple[bool, bool]:
+    """
+    Check if bitrate is likely too low or too high for resolution and codec.
+    
+    Returns:
+        Tuple of (likely_low, likely_high) booleans
+    """
     bpp = bpp_per_second(kbps, width, height, fps)
     if bpp is None:
         return False, False
@@ -300,6 +391,12 @@ def low_high_for_res(vcodec: Optional[str], width: Optional[int], height: Option
     return bpp < low_thr, bpp > high_thr
 
 def efficiency_flags(width: Optional[int], height: Optional[int]) -> List[str]:
+    """
+    Check for encoding efficiency issues in dimensions.
+    
+    Returns:
+        List of flag strings (e.g., ['non_mod16', 'odd_aspect'])
+    """
     flags: List[str] = []
     if width and height:
         if width % 16 != 0 or height % 16 != 0:
@@ -317,16 +414,62 @@ def efficiency_flags(width: Optional[int], height: Optional[int]) -> List[str]:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def fetch_entry(client: KalturaClient, entry_id: str) -> KalturaBaseEntry:
+    """
+    Fetch a Kaltura entry by ID.
+    
+    Args:
+        client: Authenticated Kaltura client
+        entry_id: Entry ID to fetch
+        
+    Returns:
+        KalturaBaseEntry object
+        
+    Raises:
+        Exception: If entry cannot be fetched (e.g., not found, permission denied)
+    """
     return client.baseEntry.get(entry_id)  # type: ignore
 
 def fetch_flavor_assets(client: KalturaClient, entry_id: str) -> List[KalturaFlavorAsset]:
+    """
+    Fetch all flavor assets for an entry with full pagination support.
+    
+    Args:
+        client: Authenticated Kaltura client
+        entry_id: Entry ID to fetch flavors for
+        
+    Returns:
+        List of all KalturaFlavorAsset objects for the entry
+    """
     f = KalturaFlavorAssetFilter()
     f.entryIdEqual = entry_id
-    pager = KalturaFilterPager(pageSize=500, pageIndex=1)
-    res = client.flavorAsset.list(f, pager)  # type: ignore
-    return list(res.objects or [])
+    page_size = 500
+    page_index = 1
+    all_assets: List[KalturaFlavorAsset] = []
+    
+    while True:
+        pager = KalturaFilterPager(pageSize=page_size, pageIndex=page_index)
+        res = client.flavorAsset.list(f, pager)  # type: ignore
+        objects = list(res.objects or [])
+        all_assets.extend(objects)
+        
+        # Break if we received fewer results than the page size
+        if len(objects) < page_size:
+            break
+        page_index += 1
+    
+    return all_assets
 
 def fetch_conversion_profile(client: KalturaClient, cp_id: int) -> Optional[KalturaConversionProfile]:
+    """
+    Fetch a conversion profile by ID.
+    
+    Args:
+        client: Authenticated Kaltura client
+        cp_id: Conversion profile ID
+        
+    Returns:
+        KalturaConversionProfile object or None if not found or ID is invalid
+    """
     if cp_id <= 0:
         return None
     try:
@@ -335,6 +478,7 @@ def fetch_conversion_profile(client: KalturaClient, cp_id: int) -> Optional[Kalt
         return None
 
 def _parse_csv_ints(csv_str: str) -> List[int]:
+    """Parse comma-separated string of integers."""
     out: List[int] = []
     for tok in str(csv_str).split(","):
         tok = tok.strip()
@@ -350,7 +494,7 @@ def fetch_enabled_flavor_param_ids(client: KalturaClient, cp: Optional[KalturaCo
     Return Flavor Params IDs enabled on the Conversion Profile.
     Strategy:
       1) Use cp.flavorParamsIds (common) or cp.profileParamsIds (older) if present (CSV).
-      2) Fallback to conversionProfileAssetParams.list (collect flavorParamsId).
+      2) Fallback to conversionProfileAssetParams.list with full pagination (collect flavorParamsId).
     """
     ids: List[int] = []
     if cp:
@@ -360,21 +504,45 @@ def fetch_enabled_flavor_param_ids(client: KalturaClient, cp: Optional[KalturaCo
             if ids:
                 return sorted(set(ids))
 
-        # Fallback: list ConversionProfileAssetParams
+        # Fallback: list ConversionProfileAssetParams with full pagination
         try:
             flt = KalturaConversionProfileAssetParamsFilter()
             flt.conversionProfileIdEqual = int(getattr(cp, "id", 0))
-            pager = KalturaFilterPager(pageSize=500, pageIndex=1)
-            res = client.conversionProfileAssetParams.list(flt, pager)  # type: ignore
-            for obj in list(getattr(res, "objects", []) or []):
-                pid = getattr(obj, "flavorParamsId", None)
-                if isinstance(pid, int):
-                    ids.append(pid)
+            page_size = 500
+            page_index = 1
+            
+            while True:
+                pager = KalturaFilterPager(pageSize=page_size, pageIndex=page_index)
+                res = client.conversionProfileAssetParams.list(flt, pager)  # type: ignore
+                objects = list(getattr(res, "objects", []) or [])
+                
+                for obj in objects:
+                    pid = getattr(obj, "flavorParamsId", None)
+                    if isinstance(pid, int):
+                        ids.append(pid)
+                
+                # Break if we received fewer results than the page size
+                if len(objects) < page_size:
+                    break
+                page_index += 1
         except Exception:
             pass
     return sorted(set(ids))
 
 def fetch_flavor_params_by_ids(client: KalturaClient, ids: Iterable[int]) -> Dict[int, KalturaFlavorParams]:
+    """
+    Fetch flavor parameters by IDs.
+    
+    Note: This uses a loop because the Kaltura client lacks a batch-get method
+    for flavor params. Each ID requires a separate API call.
+    
+    Args:
+        client: Authenticated Kaltura client
+        ids: Iterable of flavor param IDs to fetch
+        
+    Returns:
+        Dictionary mapping flavor param ID to KalturaFlavorParams object
+    """
     out: Dict[int, KalturaFlavorParams] = {}
     for pid in sorted(set(int(i) for i in ids if i != 0)):
         try:
@@ -388,10 +556,22 @@ def fetch_flavor_params_by_ids(client: KalturaClient, ids: Iterable[int]) -> Dic
 # ──────────────────────────────────────────────────────────────────────────────
 
 def classify_flavor(client: KalturaClient, fa: KalturaFlavorAsset, include_urls: bool) -> FlavorClassified:
+    """
+    Classify a flavor asset with normalized type handling.
+    
+    Args:
+        client: Authenticated Kaltura client
+        fa: Flavor asset to classify
+        include_urls: Whether to include download URLs
+        
+    Returns:
+        FlavorClassified object with normalized data
+    """
     status_label, status_code = enum_label_code(getattr(fa, "status", None), "flavor_status")
 
     is_original = bool(getattr(fa, "isOriginal", False))
-    flavor_params_id = getattr(fa, "flavorParamsId", None)
+    # Normalize flavorParamsId to int using safe_int
+    flavor_params_id = safe_int(getattr(fa, "flavorParamsId", None), None)
     reason = (getattr(fa, "description", None) or "").strip() or None
 
     # Kind
@@ -427,20 +607,29 @@ def classify_flavor(client: KalturaClient, fa: KalturaFlavorAsset, include_urls:
             except Exception:
                 url = None
 
+    # Normalize all numeric fields
+    width = safe_int(getattr(fa, "width", None), None)
+    height = safe_int(getattr(fa, "height", None), None)
+    fps = safe_float(getattr(fa, "frameRate", None) or getattr(fa, "frame_rate", None), None)
+    bitrate_kbps = safe_int(
+        getattr(fa, "bitrate", None)
+        or getattr(fa, "bitrateKbps", None)
+        or getattr(fa, "bitrateInKbps", None),
+        None
+    )
+
     return FlavorClassified(
         asset_id=getattr(fa, "id", ""),
-        flavor_params_id=int(flavor_params_id) if isinstance(flavor_params_id, int) else None,
+        flavor_params_id=flavor_params_id,
         status_label=status_label,
         status_code=status_code,
         kind=kind,
         reason=reason,
         is_original=is_original,
-        width=getattr(fa, "width", None),
-        height=getattr(fa, "height", None),
-        fps=getattr(fa, "frameRate", None) or getattr(fa, "frame_rate", None),
-        bitrate_kbps=getattr(fa, "bitrate", None)
-                    or getattr(fa, "bitrateKbps", None)
-                    or getattr(fa, "bitrateInKbps", None),
+        width=width,
+        height=height,
+        fps=fps,
+        bitrate_kbps=bitrate_kbps,
         vcodec=vcodec,
         acodec=acodec,
         tags=getattr(fa, "tags", None),
@@ -449,6 +638,8 @@ def classify_flavor(client: KalturaClient, fa: KalturaFlavorAsset, include_urls:
 
 def extract_duration_ms(entry: Any, assets: List[KalturaFlavorAsset]) -> Optional[int]:
     """
+    Extract duration in milliseconds from entry.
+    
     Kaltura duration may be seconds or ms depending on context.
     Heuristics:
       - If >= 10000 -> ms.
@@ -473,10 +664,12 @@ def extract_duration_ms(entry: Any, assets: List[KalturaFlavorAsset]) -> Optiona
 # ──────────────────────────────────────────────────────────────────────────────
 
 def indent(lines: Iterable[str], n: int = 2) -> str:
+    """Indent each line by n spaces."""
     pad = " " * n
     return "\n".join(pad + line if line else "" for line in lines)
 
 def render_bitrate_bars(rungs: List[Tuple[str, int]], width: int = 54) -> List[str]:
+    """Render visual bitrate bars for ladder rungs."""
     if not rungs:
         return []
     max_br = max((k for _, k in rungs), default=1)
@@ -485,20 +678,29 @@ def render_bitrate_bars(rungs: List[Tuple[str, int]], width: int = 54) -> List[s
     for label, kbps in rungs:
         bar_len = max(1, int((kbps / max_br) * width))
         ratio = f"   (x{kbps / prev:.2f})" if (prev and prev > 0) else ""
-        lines.append(f"  {'█' * bar_len:<{width}}  {label:>12}  {kbps:>5} kbps{ratio}")
+        lines.append(
+            f"  {'█' * bar_len:<{width}}  {label:>12}  {kbps:>5} kbps{ratio}"
+        )
         prev = kbps
     return lines
 
 def switching_notes(sorted_bitrates: List[int]) -> List[str]:
+    """Generate ABR switching guidance notes for bitrate ladder."""
     notes: List[str] = []
     for a, b in zip(sorted_bitrates, sorted_bitrates[1:]):
         if a <= 0 or b <= 0:
             continue
         r = b / a
         if r < 1.2:
-            notes.append(f"• Tiny step: {a}→{b} (x{r:.2f}) — frequent switching, little quality gain.")
+            notes.append(
+                f"• Tiny step: {a}→{b} (x{r:.2f}) — "
+                "frequent switching, little quality gain."
+            )
         elif r > 2.5:
-            notes.append(f"• Large step: {a}→{b} (x{r:.2f}) — insert a mid rung to avoid a quality cliff.")
+            notes.append(
+                f"• Large step: {a}→{b} (x{r:.2f}) — "
+                "insert a mid rung to avoid a quality cliff."
+            )
     return notes
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -506,13 +708,18 @@ def switching_notes(sorted_bitrates: List[int]) -> List[str]:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def print_overview(entry: Any, duration_ms: Optional[int]) -> None:
+    """Print entry overview section."""
     etype, etype_code = enum_label_code(getattr(entry, "type", None), "entry_type")
     estatus, estatus_code = enum_label_code(getattr(entry, "status", None), "entry_status")
     stype, stype_code = enum_label_code(getattr(entry, "sourceType", None), "source_type")
     name = getattr(entry, "name", "") or getattr(entry, "title", "")
     # Build a reliable source-download URL (paramId=0)
     partner_id = getattr(entry, "partnerId", "") or getattr(entry, "partner_id", "")
-    source_url = f"https://cdnapisec.kaltura.com/p/{partner_id}/sp/{partner_id}00/playManifest/entryId/{entry.id}/format/download/protocol/https/flavorParamIds/0"
+    source_url = (
+        f"https://cdnapisec.kaltura.com/p/{partner_id}/sp/{partner_id}00/"
+        f"playManifest/entryId/{entry.id}/format/download/protocol/https/"
+        f"flavorParamIds/0"
+    )
     print("📌 Overview")
     print(
         indent(
@@ -521,7 +728,8 @@ def print_overview(entry: Any, duration_ms: Optional[int]) -> None:
                 f"Type:    {etype} ({etype_code})    Status: {estatus} ({estatus_code})",
                 f"User:    {getattr(entry, 'userId', '')}  Duration: {fmt_duration_ms(duration_ms)}",
                 f"Source:  {stype} ({stype_code})  Download: {source_url}",
-                f"Created: {fmt_dt(getattr(entry, 'createdAt', None))}  Updated: {fmt_dt(getattr(entry, 'updatedAt', None))}",
+                f"Created: {fmt_dt(getattr(entry, 'createdAt', None))}  "
+                f"Updated: {fmt_dt(getattr(entry, 'updatedAt', None))}",
             ]
         )
     )
@@ -534,6 +742,7 @@ def print_conversion_profile(
     source_dims: Tuple[Optional[int], Optional[int]],
     params_by_id: Dict[int, KalturaFlavorParams],
 ) -> None:
+    """Print conversion profile analysis section."""
     print("🧩 Conversion Profile")
     if not cp:
         print(indent(["(No conversion profile associated with this entry)"]))
@@ -640,7 +849,11 @@ def print_conversion_profile(
     print()
 
 def print_summary(classified: List[FlavorClassified]) -> None:
-    shown = [c for c in classified if c.kind in {"TRANSCODED", "SOURCE"} and (c.bitrate_kbps or 0) > 0]
+    """Print summary statistics section."""
+    shown = [
+        c for c in classified
+        if c.kind in {"TRANSCODED", "SOURCE"} and (c.bitrate_kbps or 0) > 0
+    ]
     print("📊 Summary")
     if not shown:
         print(indent(["No playable rungs found."]))
@@ -682,8 +895,13 @@ def print_summary(classified: List[FlavorClassified]) -> None:
     print()
 
 def print_visual_ladder(classified: List[FlavorClassified]) -> None:
+    """Print visual bitrate ladder with bars."""
     rungs = sorted(
-        [(c.asset_id, int(c.bitrate_kbps)) for c in classified if c.kind in {"TRANSCODED", "SOURCE"} and (c.bitrate_kbps or 0) > 0],
+        [
+            (c.asset_id, int(c.bitrate_kbps))
+            for c in classified
+            if c.kind in {"TRANSCODED", "SOURCE"} and (c.bitrate_kbps or 0) > 0
+        ],
         key=lambda x: x[1],
     )
     if not rungs:
@@ -693,43 +911,81 @@ def print_visual_ladder(classified: List[FlavorClassified]) -> None:
         print(line)
     notes = switching_notes([kb for _, kb in rungs])
     if notes:
-        print("  Guidance: Aim for ~1.3–1.6× bitrate increase between adjacent rungs to stabilize ABR switching.")
+        print(
+            "  Guidance: Aim for ~1.3–1.6× bitrate increase between "
+            "adjacent rungs to stabilize ABR switching."
+        )
         print("  Switching Notes:")
         for n in notes:
             print("   " + n)
     print()
 
 def print_skipped(classified: List[FlavorClassified]) -> None:
+    """Print skipped flavors section, grouped by reason."""
     skipped = [c for c in classified if c.kind == "SKIPPED"]
     if not skipped:
         return
-    print("⏭️  Skipped by Optimization (NOT_APPLICABLE)")
+    
+    # Group skipped flavors by reason
+    grouped: Dict[str, List[str]] = defaultdict(list)
+    default_reason = (
+        "The source asset has a lower quality than the requested output; "
+        "transcoding was not performed."
+    )
+    
     for c in skipped:
-        reason = c.reason or "The source asset has a lower quality than the requested output; transcoding was not performed."
-        print(indent([f"- {c.asset_id} reason: {reason}"]))
+        reason = c.reason or default_reason
+        grouped[reason].append(c.asset_id)
+    
+    print("⏭️  Skipped by Optimization (NOT_APPLICABLE)")
+    for reason, asset_ids in grouped.items():
+        count = len(asset_ids)
+        if count == 1:
+            print(indent([f"• {asset_ids[0]}"]))
+        else:
+            print(indent([f"• {count} flavors: {', '.join(asset_ids)}"]))
+        print(indent([f"  Reason: {reason}"], n=4))
     print()
 
 def print_issues(classified: List[FlavorClassified]) -> None:
+    """Print issues and warnings section."""
     to_show: List[str] = []
     for c in classified:
         if c.kind == "ERROR":
-            detail = (c.reason or "").replace("\r", "").strip()
-            to_show.append(f"- {c.asset_id} Status: ERROR (-1) — {detail if detail else 'no details'}")
+            detail = clean_reason(c.reason) or "no details"
+            to_show.append(
+                f"- {c.asset_id} Status: ERROR (-1) — {detail}"
+            )
         else:
-            low, high = low_high_for_res(c.vcodec, c.width, c.height, c.fps, c.bitrate_kbps)
+            low, high = low_high_for_res(
+                c.vcodec, c.width, c.height, c.fps, c.bitrate_kbps
+            )
             label = codec_baseline_label(c.vcodec)
             if low:
-                to_show.append(f"- {c.asset_id} Bitrate may be low for resolution ({label})")
+                to_show.append(
+                    f"- {c.asset_id} Bitrate may be low for resolution ({label})"
+                )
             if high:
-                to_show.append(f"- {c.asset_id} Bitrate may be higher than needed for resolution ({label})")
+                to_show.append(
+                    f"- {c.asset_id} Bitrate may be higher than needed "
+                    f"for resolution ({label})"
+                )
     if to_show:
         print("❗ Issues")
         print(indent(to_show))
         print()
 
-def print_ladder_table(classified: List[FlavorClassified], include_urls: bool, src_h: Optional[int]) -> None:
+def print_ladder_table(
+    classified: List[FlavorClassified],
+    include_urls: bool,
+    src_h: Optional[int]
+) -> None:
+    """Print detailed ladder table."""
     print("📶 Ladder")
-    print("id           type                 kbps         WxH   fps   vcodec    exp      Δ%  flags")
+    print(
+        "id           type                 kbps         WxH   fps   "
+        "vcodec    exp      Δ%  flags"
+    )
     for c in sorted(classified, key=lambda x: (x.bitrate_kbps or 0, x.asset_id)):
         w, h = safe_int(c.width, 0), safe_int(c.height, 0)
         fps = safe_float(c.fps, 0.0)
@@ -758,20 +1014,27 @@ def print_ladder_table(classified: List[FlavorClassified], include_urls: bool, s
         fps_txt = f"{fps:.1f}" if fps else "0.0"
         vcodec_txt = (vcodec or "").lower() or "-"
 
-        print(f"{c.asset_id:<12} {kind_label:<20} {kb:>6} {wh:>10} {fps_txt:>5}  {vcodec_txt:<8} {exp:>6} {delta_pct:>7}  {flags_str}")
+        print(
+            f"{c.asset_id:<12} {kind_label:<20} {kb:>6} {wh:>10} {fps_txt:>5}  "
+            f"{vcodec_txt:<8} {exp:>6} {delta_pct:>7}  {flags_str}"
+        )
 
         # Inline, human-friendly explanations:
         extra: List[str] = []
         if "non_mod16" in flags:
-            extra.append("Dimensions not aligned to 16-pixel macroblocks/CTUs (slightly less codec/hardware friendly)")
+            extra.append(
+                "Dimensions not aligned to 16-pixel macroblocks/CTUs "
+                "(slightly less codec/hardware friendly)"
+            )
         if "odd_aspect" in flags:
             extra.append("Unusual aspect ratio; verify intended display geometry")
         if "above_source_height" in flags:
-            extra.append("Target height exceeds source; Optimization may mark as NOT_APPLICABLE")
+            extra.append(
+                "Target height exceeds source; Optimization may mark as NOT_APPLICABLE"
+            )
         if c.kind == "ERROR" and c.reason:
-            extra.append(f"Error details: {c.reason.replace(chr(13), '').strip()}")
-        if c.kind == "SKIPPED":
-            extra.append(f"Skipped (NOT_APPLICABLE [4]): {c.reason or 'Optimization skipped: source < target/policy'}")
+            extra.append(f"Error details: {clean_reason(c.reason)}")
+        # For skipped flavors, don't repeat the reason here (it's shown in the dedicated skipped section)
         if c.kind == "PENDING":
             extra.append(f"In pipeline: {c.status_label} ({c.status_code})")
         if c.kind == "SOURCE":
@@ -788,57 +1051,223 @@ def print_ladder_table(classified: List[FlavorClassified], include_urls: bool, s
 # ──────────────────────────────────────────────────────────────────────────────
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Inspect a Kaltura entry’s conversion profile and transcode ladder.")
-    ap.add_argument("--partner-id", type=int, required=True)
-    ap.add_argument("--admin-secret", required=True)
-    ap.add_argument("--admin-user-id", required=True)
-    ap.add_argument("--entry-id", required=True)
-    ap.add_argument("--service-url", default="https://www.kaltura.com/")
-    ap.add_argument("--include-urls", action="store_true", help="Include per-flavor download URLs (when available).")
+    """
+    Main entry point for the script.
+    
+    Returns:
+        Exit code (0 for success, non-zero for errors)
+    """
+    ap = argparse.ArgumentParser(
+        description="Inspect a Kaltura entry's conversion profile and transcode ladder."
+    )
+    ap.add_argument("--partner-id", type=int, required=True, help="Kaltura Partner ID")
+    ap.add_argument(
+        "--admin-secret",
+        default=os.environ.get("KALTURA_ADMIN_SECRET"),
+        help="Kaltura admin secret (or set KALTURA_ADMIN_SECRET environment variable)"
+    )
+    ap.add_argument("--admin-user-id", required=True, help="Kaltura admin user ID")
+    ap.add_argument("--entry-id", required=True, help="Entry ID to analyze")
+    ap.add_argument(
+        "--service-url",
+        default="https://www.kaltura.com/",
+        help="Kaltura service URL (default: https://www.kaltura.com/)"
+    )
+    ap.add_argument(
+        "--include-urls",
+        action="store_true",
+        help="Include per-flavor download URLs (when available)"
+    )
+    ap.add_argument(
+        "--json",
+        action="store_true",
+        help="Output results in JSON format for machine-readable consumption"
+    )
+    ap.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug logging"
+    )
     args = ap.parse_args()
+    
+    # Validate admin-secret
+    if not args.admin_secret:
+        print(
+            "❌ Error: --admin-secret is required "
+            "(or set KALTURA_ADMIN_SECRET environment variable)", 
+            file=sys.stderr
+        )
+        return 1
+    
+    # Set up logging
+    log_level = logging.DEBUG if args.debug else logging.INFO
+    logging.basicConfig(
+        level=log_level,
+        format='%(levelname)s: %(message)s'
+    )
+    logger = logging.getLogger(__name__)
+    
+    try:
+        # Client initialization
+        logger.debug(f"Initializing Kaltura client for partner {args.partner_id}")
+        cfg = KalturaConfiguration(args.partner_id)
+        cfg.serviceUrl = args.service_url
+        client = KalturaClient(cfg)
+        
+        # Authentication
+        logger.debug(f"Starting session for user {args.admin_user_id}")
+        try:
+            ks = client.session.start(
+                args.admin_secret,
+                args.admin_user_id,
+                KalturaSessionType.ADMIN,
+                args.partner_id
+            )
+            if not ks or not isinstance(ks, str) or len(ks) == 0:
+                print(
+                    "❌ Authentication Failed: Invalid session key returned",
+                    file=sys.stderr
+                )
+                return 2
+            client.setKs(ks)
+            logger.debug("Session started successfully")
+        except Exception as e:
+            print(f"❌ Authentication Failed: {e}", file=sys.stderr)
+            return 2
 
-    # Client
-    cfg = KalturaConfiguration(args.partner_id)
-    cfg.serviceUrl = args.service_url
-    client = KalturaClient(cfg)
-    ks = client.session.start(args.admin_secret, args.admin_user_id, KalturaSessionType.ADMIN, args.partner_id)
-    client.setKs(ks)
+        # Fetch entry
+        logger.debug(f"Fetching entry {args.entry_id}")
+        try:
+            entry = fetch_entry(client, args.entry_id)
+        except Exception as e:
+            print(f"❌ Failed to fetch entry '{args.entry_id}': {e}", file=sys.stderr)
+            logger.debug("Entry fetch error details", exc_info=True)
+            return 3
+        
+        # Fetch flavor assets
+        logger.debug("Fetching flavor assets")
+        try:
+            assets = fetch_flavor_assets(client, args.entry_id)
+            logger.debug(f"Found {len(assets)} flavor assets")
+        except Exception as e:
+            print(f"❌ Failed to fetch flavor assets: {e}", file=sys.stderr)
+            logger.debug("Flavor assets fetch error details", exc_info=True)
+            return 4
 
-    # Fetch entry & flavors
-    entry = fetch_entry(client, args.entry_id)
-    assets = fetch_flavor_assets(client, args.entry_id)
+        # Robust duration
+        duration_ms = extract_duration_ms(entry, assets)
 
-    # Robust duration
-    duration_ms = extract_duration_ms(entry, assets)
+        # Classify flavors
+        logger.debug("Classifying flavors")
+        classified: List[FlavorClassified] = [
+            classify_flavor(client, fa, args.include_urls) for fa in assets
+        ]
 
-    # Classify flavors
-    classified: List[FlavorClassified] = [classify_flavor(client, fa, args.include_urls) for fa in assets]
+        # Source dimensions (prefer the uploaded source, fall back to entry dims)
+        src_w = safe_int(get_attr_any(entry, "width"), 0)
+        src_h = safe_int(get_attr_any(entry, "height"), 0)
+        for c in classified:
+            if c.kind == "SOURCE":
+                src_w = c.width or src_w
+                src_h = c.height or src_h
+                break
 
-    # Source dimensions (prefer the uploaded source, fall back to entry dims)
-    src_w = safe_int(get_attr_any(entry, "width"), 0)
-    src_h = safe_int(get_attr_any(entry, "height"), 0)
-    for c in classified:
-        if c.kind == "SOURCE":
-            src_w = c.width or src_w
-            src_h = c.height or src_h
-            break
+        # Conversion profile
+        logger.debug("Fetching conversion profile")
+        cp_id = safe_int(
+            get_attr_any(entry, "conversionProfileId", "conversion_profile_id"), 0
+        )
+        try:
+            cp = fetch_conversion_profile(client, cp_id)
+            enabled_param_ids = fetch_enabled_flavor_param_ids(client, cp)
+            params_by_id = (
+                fetch_flavor_params_by_ids(client, enabled_param_ids)
+                if enabled_param_ids
+                else {}
+            )
+            logger.debug(
+                f"Conversion profile: {cp_id}, enabled params: {enabled_param_ids}"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to fetch conversion profile details: {e}")
+            cp = None
+            enabled_param_ids = []
+            params_by_id = {}
 
-    # Conversion profile
-    cp_id = safe_int(get_attr_any(entry, "conversionProfileId", "conversion_profile_id"), 0)
-    cp = fetch_conversion_profile(client, cp_id)
-    enabled_param_ids = fetch_enabled_flavor_param_ids(client, cp)
-    params_by_id = fetch_flavor_params_by_ids(client, enabled_param_ids) if enabled_param_ids else {}
+        # Output
+        if args.json:
+            # JSON output
+            output_data = {
+                "entry": {
+                    "id": getattr(entry, "id", ""),
+                    "name": getattr(entry, "name", "") or getattr(entry, "title", ""),
+                    "type": enum_label_code(
+                        getattr(entry, "type", None), "entry_type"
+                    )[0],
+                    "status": enum_label_code(
+                        getattr(entry, "status", None), "entry_status"
+                    )[0],
+                    "duration_ms": duration_ms,
+                    "width": src_w,
+                    "height": src_h,
+                    "created_at": getattr(entry, "createdAt", None),
+                    "updated_at": getattr(entry, "updatedAt", None),
+                },
+                "conversion_profile": {
+                    "id": cp_id,
+                    "name": getattr(cp, "name", "") if cp else None,
+                    "type": enum_label_code(
+                        getattr(cp, "type", None), "cp_type"
+                    )[0] if cp else None,
+                    "status": enum_label_code(
+                        getattr(cp, "status", None), "cp_status"
+                    )[0] if cp else None,
+                    "enabled_param_ids": enabled_param_ids,
+                } if cp else None,
+                "flavors": [
+                    {
+                        "asset_id": c.asset_id,
+                        "flavor_params_id": c.flavor_params_id,
+                        "status": c.status_label,
+                        "kind": c.kind,
+                        "reason": c.reason,
+                        "is_original": c.is_original,
+                        "width": c.width,
+                        "height": c.height,
+                        "fps": c.fps,
+                        "bitrate_kbps": c.bitrate_kbps,
+                        "vcodec": c.vcodec,
+                        "acodec": c.acodec,
+                        "tags": c.tags,
+                        "download_url": c.download_url,
+                    }
+                    for c in classified
+                ],
+            }
+            print(json.dumps(output_data, indent=2))
+        else:
+            # Human-readable output
+            print_overview(entry, duration_ms)
+            print_conversion_profile(
+                cp, enabled_param_ids, classified, (src_w, src_h), params_by_id
+            )
+            print_summary(classified)
+            print_visual_ladder(classified)
+            print_skipped(classified)
+            print_issues(classified)
+            print_ladder_table(
+                classified, include_urls=args.include_urls, src_h=src_h or None
+            )
 
-    # Output
-    print_overview(entry, duration_ms)
-    print_conversion_profile(cp, enabled_param_ids, classified, (src_w, src_h), params_by_id)
-    print_summary(classified)
-    print_visual_ladder(classified)
-    print_skipped(classified)
-    print_issues(classified)
-    print_ladder_table(classified, include_urls=args.include_urls, src_h=src_h or None)
-
-    return 0
+        return 0
+        
+    except KeyboardInterrupt:
+        print("\n❌ Operation cancelled by user", file=sys.stderr)
+        return 130
+    except Exception as e:
+        print(f"❌ Unexpected error: {e}", file=sys.stderr)
+        logger.debug("Unexpected error details", exc_info=True)
+        return 1
 
 if __name__ == "__main__":
     sys.exit(main())
