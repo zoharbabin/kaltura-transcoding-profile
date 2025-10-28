@@ -28,6 +28,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -700,13 +701,27 @@ def print_visual_ladder(classified: List[FlavorClassified]) -> None:
     print()
 
 def print_skipped(classified: List[FlavorClassified]) -> None:
+    """Print skipped flavors section, grouped by reason."""
     skipped = [c for c in classified if c.kind == "SKIPPED"]
     if not skipped:
         return
-    print("⏭️  Skipped by Optimization (NOT_APPLICABLE)")
+    
+    # Group skipped flavors by reason
+    grouped: Dict[str, List[str]] = defaultdict(list)
+    default_reason = "The source asset has a lower quality than the requested output; transcoding was not performed."
+    
     for c in skipped:
-        reason = c.reason or "The source asset has a lower quality than the requested output; transcoding was not performed."
-        print(indent([f"- {c.asset_id} reason: {reason}"]))
+        reason = c.reason or default_reason
+        grouped[reason].append(c.asset_id)
+    
+    print("⏭️  Skipped by Optimization (NOT_APPLICABLE)")
+    for reason, asset_ids in grouped.items():
+        count = len(asset_ids)
+        if count == 1:
+            print(indent([f"• {asset_ids[0]}"]))
+        else:
+            print(indent([f"• {count} flavors: {', '.join(asset_ids)}"]))
+        print(indent([f"  Reason: {reason}"], n=4))
     print()
 
 def print_issues(classified: List[FlavorClassified]) -> None:
@@ -770,8 +785,7 @@ def print_ladder_table(classified: List[FlavorClassified], include_urls: bool, s
             extra.append("Target height exceeds source; Optimization may mark as NOT_APPLICABLE")
         if c.kind == "ERROR" and c.reason:
             extra.append(f"Error details: {c.reason.replace(chr(13), '').strip()}")
-        if c.kind == "SKIPPED":
-            extra.append(f"Skipped (NOT_APPLICABLE [4]): {c.reason or 'Optimization skipped: source < target/policy'}")
+        # For skipped flavors, don't repeat the reason here (it's shown in the dedicated skipped section)
         if c.kind == "PENDING":
             extra.append(f"In pipeline: {c.status_label} ({c.status_code})")
         if c.kind == "SOURCE":
