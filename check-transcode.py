@@ -253,6 +253,12 @@ def fmt_duration_ms(ms: Optional[int]) -> str:
         return f"{int(h)}h {int(m)}m {s:.3f}s"
     return f"{int(m)}m {s:.3f}s"
 
+def clean_reason(reason: Optional[str]) -> str:
+    """Clean and normalize reason text by removing carriage returns and extra whitespace."""
+    if not reason:
+        return ""
+    return reason.replace("\r", "").replace(chr(13), "").strip()
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Models
 # ──────────────────────────────────────────────────────────────────────────────
@@ -946,10 +952,9 @@ def print_issues(classified: List[FlavorClassified]) -> None:
     to_show: List[str] = []
     for c in classified:
         if c.kind == "ERROR":
-            detail = (c.reason or "").replace("\r", "").strip()
+            detail = clean_reason(c.reason) or "no details"
             to_show.append(
-                f"- {c.asset_id} Status: ERROR (-1) — "
-                f"{detail if detail else 'no details'}"
+                f"- {c.asset_id} Status: ERROR (-1) — {detail}"
             )
         else:
             low, high = low_high_for_res(
@@ -1028,7 +1033,7 @@ def print_ladder_table(
                 "Target height exceeds source; Optimization may mark as NOT_APPLICABLE"
             )
         if c.kind == "ERROR" and c.reason:
-            extra.append(f"Error details: {c.reason.replace(chr(13), '').strip()}")
+            extra.append(f"Error details: {clean_reason(c.reason)}")
         # For skipped flavors, don't repeat the reason here (it's shown in the dedicated skipped section)
         if c.kind == "PENDING":
             extra.append(f"In pipeline: {c.status_label} ({c.status_code})")
